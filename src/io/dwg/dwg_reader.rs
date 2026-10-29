@@ -1222,6 +1222,70 @@ impl<R: Read + Seek> DwgReader<R> {
         result
     }
 
+    /// Like [`Self::read_sharded`], but decodes up to `decoders` shards at
+    /// once, each on its own reader over a clone of the stream, and hands
+    /// them to `each` in file order on the calling thread. At most `decoders`
+    /// decoded shards are held at a time besides the one being handed on.
+    ///
+    /// The first shard, which plans the others, is read on its own. With the
+    /// `parallel` feature on a native target the later shards are decoded on
+    /// the current Rayon pool; otherwise they are decoded one after another.
+    /// A `decoders` of 0 or 1 is [`Self::read_sharded`]. The progress
+    /// callback, if any, reports the first shard only.
+    pub fn read_sharded_parallel<F>(
+        &mut self,
+        max_entities: usize,
+        decoders: usize,
+        mut each: F,
+    ) -> std::result::Result<usize, DxfError>
+    where
+        R: Clone + Send,
+        F: FnMut(crate::io::read::ReadOutcome) -> std::result::Result<(), DxfError>,
+    {
+        if decoders <= 1 {
+            return self.read_sharded(max_entities, each);
+        }
+        self.shard = Some(ShardState::new(max_entities));
+        let first = self.read_with_stats();
+        let shard = self.shard.take();
+        each(first?)?;
+        let Some(mut shard) = shard else {
+            return Ok(1);
+        };
+        let count = shard.count().max(1);
+        let mut next = 1;
+        while next < count {
+            let window: Vec<Self> = (next..count.min(next + decoders))
+                .map(|index| self.fork(shard.fork(index)))
+                .collect();
+            next += window.len();
+            for outcome in map_ordered(window, |mut reader| reader.read_with_stats()) {
+                each(outcome?)?;
+            }
+        }
+        Ok(count)
+    }
+
+    /// A reader over a clone of the stream, with this reader's options, that
+    /// decodes one shard.
+    fn fork(&self, shard: ShardState) -> Self
+    where
+        R: Clone,
+    {
+        Self {
+            stream: self.stream.clone(),
+            options: self.options.clone(),
+            notifications: NotificationCollection::new(),
+            source_path: self.source_path.clone(),
+            progress: None,
+            legacy_font_resolver: self.legacy_font_resolver.clone(),
+            r12_code_page: self.r12_code_page.clone(),
+            pending_diagnostics: Vec::new(),
+            decompressed_bytes_used: 0,
+            shard: Some(shard),
+        }
+    }
+
     fn read_with_optional_visitor(
         &mut self,
         visit: Option<

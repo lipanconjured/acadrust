@@ -205,3 +205,41 @@ fn sample_drawings_read_in_shards_equal_a_single_read() {
         "no sample drawing was read in more than one shard"
     );
 }
+
+#[test]
+fn parallel_shards_arrive_in_order_and_equal_sequential_shards() {
+    let bytes = DwgWriter::write_to_vec(&drawing(90)).unwrap();
+    let sequential = read_shards(&bytes, 10);
+    for decoders in [2, 3, 16] {
+        let mut parallel = Vec::new();
+        let count = DwgReader::from_stream(Cursor::new(bytes.as_slice()))
+            .read_sharded_parallel(10, decoders, |shard| {
+                parallel.push(shard.document);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(count, sequential.len());
+        assert_eq!(parallel.len(), sequential.len());
+        for (parallel, sequential) in parallel.iter().zip(&sequential) {
+            assert_eq!(model_space(parallel), model_space(sequential));
+            assert_eq!(parallel.layers.len(), sequential.layers.len());
+        }
+    }
+}
+
+#[test]
+fn an_error_from_the_callback_stops_a_parallel_read() {
+    let bytes = DwgWriter::write_to_vec(&drawing(90)).unwrap();
+    let mut calls = 0;
+    let result =
+        DwgReader::from_stream(Cursor::new(bytes.as_slice())).read_sharded_parallel(10, 4, |_| {
+            calls += 1;
+            if calls == 2 {
+                Err(DxfError::Parse("stop".into()))
+            } else {
+                Ok(())
+            }
+        });
+    assert!(result.is_err());
+    assert_eq!(calls, 2);
+}

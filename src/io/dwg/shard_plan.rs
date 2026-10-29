@@ -56,6 +56,19 @@ impl ShardState {
         self.plan.len()
     }
 
+    /// The state of a reader that decodes only shard `index`, sharing the
+    /// object section and taking that shard's records from this plan.
+    pub(crate) fn fork(&mut self, index: usize) -> Self {
+        let own = self.plan.get_mut(index).map(std::mem::take);
+        Self {
+            max_entities: self.max_entities,
+            objects: self.objects.clone(),
+            shared: self.shared.clone(),
+            plan: vec![own.unwrap_or_default()],
+            index: 0,
+        }
+    }
+
     /// The object section, handle count and handle map of the current shard,
     /// when an earlier shard has already read the section and planned the
     /// shards.
